@@ -7,9 +7,11 @@
 */
 #include <ArduinoJson.h>
 #include <WiFiNINA.h>
+#include "arduino_secrets.h"
 #include "CuteBuzzerSounds.h"
 
-// Global variables
+char ssid[] = SECRET_SSID;
+char pass[] = SECRET_PASS;
 int status = WL_IDLE_STATUS;
 char server[] = "meredith.vercel.app";
 
@@ -58,6 +60,8 @@ void setup() {
 
   setupTrigger(trigger_left);
   setupTrigger(trigger_right);
+
+  connect_to_wifi();
 }
 
 /**
@@ -158,8 +162,8 @@ void sendHealthCheck(bool override) {
 
     digitalWrite(trigger_left.led_success, HIGH);
     digitalWrite(trigger_right.led_success, HIGH);
-    
-    delay(250); // simulate an http request delay
+
+    send_http_request();
     
     digitalWrite(trigger_left.led_success, LOW);
     digitalWrite(trigger_right.led_success, LOW);
@@ -189,5 +193,112 @@ void checkTrigger(TimedTriggerConfig& config) {
   } else {
     // Trigger is not pressed, reset the start time
     config.trigger_press_start_time = 0;
+  }
+}
+
+void connect_to_wifi() {
+  if (WiFi.status() == WL_NO_MODULE) {
+    Serial.println("Communication with WiFi module failed!");
+    cute.play(S_DISCONNECTION);
+    cute.play(S_DISGRUNTLED);
+    cute.play(S_DISGRUNTLED);
+    while (true);
+  }
+
+  while (status != WL_CONNECTED) {
+    Serial.print("Attempting to connect to SSID: ");
+    Serial.println(ssid);
+    status = WiFi.begin(ssid, pass);
+    delay(10000);
+  }
+
+  Serial.println("Connected to WiFi");
+  cute.play(S_CONNECTION);
+  delay(250);
+  cute.play(S_DISCONNECTION);
+  delay(250);
+  cute.play(S_CONNECTION);
+  print_wifi_status();
+}
+
+void print_wifi_status() {
+  Serial.print("SSID: ");
+  Serial.println(WiFi.SSID());
+
+  IPAddress ip = WiFi.localIP();
+  Serial.print("IP Address: ");
+  Serial.println(ip);
+
+  long rssi = WiFi.RSSI();
+  Serial.print("Signal Strength (RSSI):");
+  Serial.print(rssi);
+  Serial.println(" dBm");
+}
+
+void send_http_request() {
+  while (client.available()) {
+    char c = client.read();
+    Serial.write(c);
+  }
+  client.stop();
+
+  Serial.println("\nStarting connection to server...");
+  if (client.connect(server, 443)) {
+    cute.play(S_BUTTON_PUSHED);
+    Serial.println("connected to server");
+
+    client.println("GET /api/example?query=123 HTTP/1.1");
+    client.println("Host: meredith.vercel.app");
+    client.println("Connection: close");
+    client.println("Content-Type: application/json");
+  
+    if (client.println() == 0) {
+      Serial.println(F("Failed to send request"));
+      cute.play(S_CONFUSED);
+      return;
+    }
+
+    char status[32] = {0};
+    client.readBytesUntil('\r', status, sizeof(status));
+    if (strcmp(status, "HTTP/1.1 200 OK") != 0) {
+      Serial.print(F("Unexpected response: "));
+      Serial.println(status);
+      cute.play(S_DISGRUNTLED);
+      return;
+    }
+
+    char end_of_headers[] = "\r\n\r\n";
+    if (!client.find(end_of_headers)) {
+      Serial.println(F("Invalid response1"));
+      cute.play(S_DISGRUNTLED);
+      return;
+    }
+
+    char end_of_headers2[] = "\r";
+    if (!client.find(end_of_headers2)) {
+      Serial.println(F("Invalid response2"));
+      cute.play(S_DISGRUNTLED);
+      return;
+    }
+
+    const size_t capacity = JSON_OBJECT_SIZE(12) + 170;
+    StaticJsonDocument<capacity> doc;
+
+    DeserializationError error = deserializeJson(doc, client);
+    if (error) {
+      Serial.print(F("deserializeJson() failed: "));
+      Serial.println(error.c_str());
+      cute.play(S_DISGRUNTLED);
+      return;
+    }
+
+    Serial.println("no errors. Assume success");
+    cute.play(S_MODE1);
+    cute.play(S_CONNECTION);
+    cute.play(S_MODE1);
+  } else {
+    Serial.println("connection failed");
+    cute.play(S_DISGRUNTLED);
+    cute.play(S_DISGRUNTLED);
   }
 }
