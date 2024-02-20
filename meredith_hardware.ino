@@ -18,7 +18,8 @@ const int buzzer = 15;
 const int button_health_check = 13;
 const int led_big_button = 14;
 const int big_button_long_press_limit = 5000;
-const int default_trigger_alert_limit = 50000;
+const int default_trigger_alert_limit = 5000;
+const int default_retrigger_alert_limit = 9000;
 const int health_check_time_between = 3600000;
 const int override_length = 60000;
 const int common_loop_delay = 250;
@@ -30,11 +31,15 @@ struct TimedTriggerConfig {
   int led_error;
   unsigned long trigger_press_start_time;
   int trigger_alert_limit;
+  int primaryAlertId;
+  bool isAlerting;
+  unsigned long last_alert_send_time;
+  int retrigger_alert_limit;
 };
 
 // Configurations for existing triggers
-TimedTriggerConfig trigger_left = {3, 19, 21, 0, default_trigger_alert_limit};
-TimedTriggerConfig trigger_right = {4, 16, 20, 0, default_trigger_alert_limit};
+TimedTriggerConfig trigger_left = {3, 19, 21, 0, default_trigger_alert_limit, 1, false, 0, default_retrigger_alert_limit};
+TimedTriggerConfig trigger_right = {4, 16, 20, 0, default_trigger_alert_limit, 2, false, 0, default_retrigger_alert_limit};
 
 unsigned long healthCheckLastSendTime = 0;
 unsigned long bigButtonPushDuration = 0;
@@ -44,6 +49,7 @@ bool shouldOverrideTimedTriggers = false;
 
 // setup prototypes for functions with default params
 void sendHealthCheck(bool override = false);
+void send_http_request(int primaryAlertId = 0, bool isResetingAlert = false);
 
 /**
  * Initialize with base setup
@@ -192,20 +198,34 @@ void sendHealthCheck(bool override) {
  */
 void checkTrigger(TimedTriggerConfig& config) {
   if (digitalRead(config.trigger) == HIGH) {
+    // newly detected trigger press
     if (config.trigger_press_start_time == 0) {
       config.trigger_press_start_time = millis();
-    }
-    if (millis() - config.trigger_press_start_time > config.trigger_alert_limit) {
+    } else if (config.isAlerting) {
       digitalWrite(config.led_success, HIGH);
       digitalWrite(config.led_error, HIGH);
-      cute.play(S_CONNECTION);
-      delay(2000); // simulate an http request delay
+      delay(common_loop_delay);
       digitalWrite(config.led_success, LOW);
       digitalWrite(config.led_error, LOW);
+      // send a new alert if retrigger_alert_limit time has passed since the previous message
+      if (millis() - config.last_alert_send_time > config.retrigger_alert_limit) {
+        Serial.println("retriggering alert");
+        config.last_alert_send_time = millis();
+        send_http_request(config.primaryAlertId);
+      }
+    } else if (millis() - config.trigger_press_start_time > config.trigger_alert_limit) {
+      // time limit has passed and an initial alert needs to be triggered
+      Serial.println("triggering initial alert");
+      config.isAlerting = true;
+      config.last_alert_send_time = millis();
+      send_http_request(config.primaryAlertId);
     }
-  } else {
-    // Trigger is not pressed, reset the start time
+  } else if (config.isAlerting){
+    // Trigger can cease alerting
     config.trigger_press_start_time = 0;
+    config.last_alert_send_time = 0;
+    config.isAlerting = false;
+    send_http_request(config.primaryAlertId, true);
   }
 }
 
@@ -245,19 +265,44 @@ void print_wifi_status() {
   Serial.print(rssi);
   Serial.println(" dBm");
   Serial.println("Pausing to allow time for attaching monitor");
-  delay(10000);
+  delay(3000);
   Serial.println("Pause complete");
 }
 
-void send_http_request() {
+void send_http_request(int primaryAlertId, bool isResetingAlert) {
   Serial.println("\nStarting connection to server...");
+  
+  if (WL_IDLE_STATUS != WL_CONNECTED) {
+    Serial.println("oh! Not connected. Try reconnect");
+    connect_to_wifi();
+  }
+
+  if (status != WL_CONNECTED) {
+    // trigger three S_DISGRUNTLED so we can notify about not-connected error
+    // TODO prob need to add WIFI reconnect logic here - see https://forum.arduino.cc/t/arduino-wifi-rev2-reconnecting-to-wifi-after-disconnected/1022789
+    cute.play(S_DISGRUNTLED);
+    cute.play(S_DISGRUNTLED);
+    cute.play(S_DISGRUNTLED);
+    return;
+  }
 
   if (client.connect(SECRET_SERVER, 443)) {
     cute.play(S_BUTTON_PUSHED);
     Serial.println("connected to server");
 
     client.print("GET ");
-    client.print(SECRET_HEALTH_PATH);
+    client.print(SECRET_PATH_WITH_INTENT);
+    if (!primaryAlertId) {
+      client.print("health");
+    } else {
+      client.print("primary");
+      client.print("&primaryAlertId=");
+      client.print(primaryAlertId);
+      if (isResetingAlert) {
+        client.print("&isResetingAlert=true");
+      }
+    }
+
     client.println(" HTTP/1.1");
     client.print("Host: ");
     client.println(SECRET_HOST_NAME);
@@ -272,11 +317,29 @@ void send_http_request() {
     char reqStatus[32] = {0};
     client.readBytesUntil('\r', reqStatus, sizeof(reqStatus));
 
-    if (strncmp(reqStatus, "HTTP/1.1 201 Created", 15) != 0) {
-      Serial.print(F("Unexpected response: "));
-      Serial.println(reqStatus);
-      cute.play(S_DISGRUNTLED);
-      return;
+    // Check if the status starts with "HTTP/1.1"
+    if (strncmp(reqStatus, "HTTP/1.1", 8) == 0) {
+        // Extract the status code
+        char* statusCodePtr = reqStatus + 9; // Skip "HTTP/1.1 "
+        int statusCode = atoi(statusCodePtr);
+
+        // Check if the status code is in the range of success codes (200-299)
+        if (statusCode >= 200 && statusCode < 300) {
+            // Success response
+            // Continue with your code logic here
+        } else {
+            // Unexpected response
+            Serial.print(F("Unexpected response: "));
+            Serial.println(reqStatus);
+            cute.play(S_DISGRUNTLED);
+            return;
+        }
+    } else {
+        // Response doesn't start with "HTTP/1.1"
+        Serial.print(F("Invalid HTTP response: "));
+        Serial.println(reqStatus);
+        cute.play(S_DISGRUNTLED);
+        return;
     }
 
     char end_of_headers[] = "\r\n\r\n";
@@ -299,8 +362,7 @@ void send_http_request() {
   } else {
     Serial.print("Connection failed for unknown reason. Debugging needed. WL_IDLE_STATUS: ");
     Serial.println(WL_IDLE_STATUS);
-    // trigger two S_DISGRUNTLED so we can notify about  the unknown error
-    // TODO prob need to add WIFI reconnect logic here - see https://forum.arduino.cc/t/arduino-wifi-rev2-reconnecting-to-wifi-after-disconnected/1022789
+    // trigger two S_DISGRUNTLED so we can notify about the unknown error
     cute.play(S_DISGRUNTLED);
     cute.play(S_DISGRUNTLED);
   }
