@@ -8,7 +8,6 @@ This util is built with two included triggers (trigger_left and trigger_right). 
 
 This utility will either be paired with a web app to handle the http trigger actions events or it will fire against the Twilio API directly, TBD
 
-
 ![main_1](https://github.com/iammatthew2/meredith_hardware/assets/1512727/2087663b-f7f8-44f8-b015-8417a4de62cd)
 
 
